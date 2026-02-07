@@ -12,6 +12,7 @@ from flask import Flask, request, jsonify, Response, render_template, send_from_
 from conf import BASE_DIR
 from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen
 from myUtils.postVideo import post_video_tencent, post_video_DouYin, post_video_ks, post_video_xhs
+from sms_code_store import submit as sms_code_submit, get_and_clear as sms_code_get_and_clear
 
 active_queues = {}
 app = Flask(__name__)
@@ -68,6 +69,21 @@ def upload_file():
         return jsonify({"code":200,"msg": "File uploaded successfully", "data": f"{uuid_v1}_{file.filename}"}), 200
     except Exception as e:
         return jsonify({"code":200,"msg": str(e),"data":None}), 500
+
+@app.route('/api/sms-code', methods=['POST'])
+def api_sms_code_submit():
+    """接收前端提交的短信验证码，供发布任务（如抖音）轮询消费"""
+    try:
+        data = request.get_json() or {}
+        platform = data.get('platform', 'douyin').strip()
+        code = data.get('code', '').strip()
+        if not code:
+            return jsonify({"code": 400, "msg": "验证码不能为空", "data": None}), 400
+        sms_code_submit(platform, code)
+        return jsonify({"code": 200, "msg": "验证码已提交，发布任务将自动填充", "data": {"platform": platform}}), 200
+    except Exception as e:
+        return jsonify({"code": 500, "msg": str(e), "data": None}), 500
+
 
 @app.route('/getFile', methods=['GET'])
 def get_file():

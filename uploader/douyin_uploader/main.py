@@ -3,11 +3,13 @@ from datetime import datetime
 
 from playwright.async_api import Playwright, async_playwright, Page
 import os
+import time
 import asyncio
 
 from conf import LOCAL_CHROME_PATH, LOCAL_CHROME_HEADLESS
 from utils.base_social_media import set_init_script
 from utils.log import douyin_logger
+from sms_code_store import get_and_clear as sms_code_get_and_clear
 
 
 async def cookie_auth(account_file):
@@ -213,6 +215,9 @@ class DouYinVideo(object):
                 douyin_logger.success("  [-]视频发布成功")
                 break
             except:
+                # 尝试处理短信验证码弹窗
+                if await self.handle_sms_verification(page):
+                    continue
                 # 尝试处理封面问题
                 await self.handle_auto_video_cover(page)
                 douyin_logger.info("  [-] 视频正在发布中...")
@@ -225,6 +230,53 @@ class DouYinVideo(object):
         # 关闭浏览器上下文和浏览器实例
         await context.close()
         await browser.close()
+
+    async def handle_sms_verification(self, page, wait_seconds: int = 120) -> bool:
+        """
+        检测并处理发布时的短信验证码弹窗
+        - 点击「获取验证码」触发短信
+        - 轮询 sms_code_store，收到验证码后自动填充并点击「验证」
+        """
+        sms_modal = page.get_by_text("接收短信验证码").first
+        if not await sms_modal.is_visible():
+            return False
+        douyin_logger.info("  [-] 检测到短信验证码弹窗，正在请求验证码...")
+        try:
+            # 「获取验证码」在抖音弹窗中是 <p> 元素，位于 .uc-ui-input_right 内
+            get_code_btn = page.locator(".uc-ui-verify_sms-verify .uc-ui-input_right p:has-text('获取验证码')").first
+            try:
+                await get_code_btn.click(timeout=3000)
+                douyin_logger.info("  [-] 已点击「获取验证码」")
+            except Exception:
+                # 可能短信已自动发送（按钮变为倒计时），忽略
+                pass
+            await asyncio.sleep(1)
+            douyin_logger.info(f"  [-] 等待从页面提交验证码，最多 {wait_seconds} 秒...")
+            # 轮询 sms_code_store，收到验证码后自动填充
+            code = None
+            deadline = time.time() + wait_seconds
+            while time.time() < deadline:
+                code = sms_code_get_and_clear("douyin")
+                if code:
+                    break
+                await asyncio.sleep(1)
+            if not code:
+                douyin_logger.warning(f"  [-] 等待验证码超时（{wait_seconds} 秒）")
+                return False
+            # 填充验证码到输入框（.uc-ui-input_textbox > input，placeholder="请输入验证码"）
+            code_input = page.locator(".uc-ui-verify_sms-verify .uc-ui-input_textbox input[placeholder='请输入验证码']").first
+            await code_input.fill(code)
+            douyin_logger.info("  [-] 已填充验证码，等待按钮可用...")
+            await asyncio.sleep(0.5)  # 等输入生效、验证按钮由 disabled 变为可点击
+            # 点击「验证」按钮（.uc-ui-verify_sms-verify_button 无 .second 的为验证，取消有 .second）
+            verify_btn = page.locator(".uc-ui-verify_sms-verify .uc-ui-verify_sms-verify_button:not(.second)").first
+            await verify_btn.click(timeout=3000)
+            douyin_logger.info("  [-] 验证码已提交，继续发布...")
+            await asyncio.sleep(1)
+            return True
+        except Exception as e:
+            douyin_logger.warning(f"  [-] 等待验证码超时或出错: {e}")
+            return False
 
     async def handle_auto_video_cover(self, page):
         """
